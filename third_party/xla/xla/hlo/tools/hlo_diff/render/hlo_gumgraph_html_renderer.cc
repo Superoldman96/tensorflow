@@ -210,6 +210,7 @@ std::string PrintCss() {
       overflow: auto;
       white-space: pre-wrap;
       height: 100%;
+      counter-reset: instruction;
     }
     .hlo-textbox > .textbox > .click-to-copy {
       position: absolute;
@@ -239,6 +240,21 @@ std::string PrintCss() {
       display: flex;
       width: 100%;
       align-items: flex-start;
+      border: 2px solid transparent;
+      box-sizing: border-box;
+      counter-increment: instruction;
+      position: relative;
+      padding-left: 3.5em;
+    }
+    div.hlo-instruction::before {
+      content: counter(instruction);
+      position: absolute;
+      left: 0;
+      width: 3em;
+      text-align: right;
+      padding-right: 0.5em;
+      color: #888;
+      user-select: none;
     }
     div.hlo-instruction.expanded {
       max-width: unset;
@@ -274,7 +290,19 @@ std::string PrintCss() {
     div.hlo-instruction.has-overflow:not(.expanded):hover button.hlo-expand-btn {
       visibility: visible;
     }
-    div.bordered {
+    button.hlo-program-shape-btn {
+      background: #e8eaf6;
+      color: #3f51b5;
+      padding: 0 4px;
+      border: 1px solid #c5cae9;
+      box-shadow: none;
+      font-weight: bold;
+      margin-left: 4px;
+      height: 1.3em;
+      line-height: 1.1;
+      cursor: pointer;
+    }
+    div.hlo-instruction.bordered {
       border: 2px solid #4285F4;
     }
 
@@ -412,6 +440,23 @@ std::string PrintJavascriptForHoverEvent() {
           e.stopPropagation();
         });
       }
+  });
+
+  const allProgramShapeButtons = document.querySelectorAll('.hlo-program-shape-btn');
+  allProgramShapeButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const shapeSpan = btn.nextElementSibling;
+      if (shapeSpan && shapeSpan.classList.contains('hlo-program-shape')) {
+        if (shapeSpan.style.display === 'none') {
+          shapeSpan.style.display = 'inline';
+          btn.textContent = 'hide program shape';
+        } else {
+          shapeSpan.style.display = 'none';
+          btn.textContent = 'show program shape';
+        }
+      }
+      e.stopPropagation();
+    });
   });
 
   function getRelatedDivs(diffId, mappedId) {
@@ -662,7 +707,7 @@ std::string PrintHowToUseSection() {
           <ul>
             <li><span class="red-highlight">&nbsp;Red&nbsp;</span>: Instruction only present in the left module.</li>
             <li><span class="green-highlight">&nbsp;Green&nbsp;</span>: Instruction only present in the right module.</li>
-            <li><span class="yellow-highlight">&nbsp;Yellow&nbsp;</span>: Instruction present in both modules but with differences.</li>
+            <li><span class="yellow-highlight">&nbsp;Yellow&nbsp;</span>: Instruction present in both modules but with differences. Character-level differences are highlighted in <span class="darker-yellow-highlight">&nbsp;darker yellow&nbsp;</span> (this is skipped for instructions with >10k characters due to performance concern).</li>
             <li>Instructions without highlights are identical in both modules.</li>
           </ul>
         </p>
@@ -775,42 +820,42 @@ absl::flat_hash_map<const HloInstruction*, Attributes> GenerateSpanAttributes(
   for (auto& instruction : diff_result.left_module_unmatched_instructions) {
     span_attributes[instruction] =
         Attributes{.highlight = "red-highlight",
-                   .diffid = std::string(instruction->name()),
+                   .diffid = absl::StrCat("left:", instruction->name()),
                    .mapped_diffid = "",
                    .mapped_instruction = nullptr};
   }
   for (auto& instruction : diff_result.right_module_unmatched_instructions) {
     span_attributes[instruction] =
         Attributes{.highlight = "green-highlight",
-                   .diffid = std::string(instruction->name()),
+                   .diffid = absl::StrCat("right:", instruction->name()),
                    .mapped_diffid = "",
                    .mapped_instruction = nullptr};
   }
   for (const auto& [l_instruction, r_instruction] :
        diff_result.changed_instructions) {
-    span_attributes[l_instruction] =
-        Attributes{.highlight = "yellow-highlight",
-                   .diffid = std::string(l_instruction->name()),
-                   .mapped_diffid = std::string(r_instruction->name()),
-                   .mapped_instruction = r_instruction};
-    span_attributes[r_instruction] =
-        Attributes{.highlight = "yellow-highlight",
-                   .diffid = std::string(r_instruction->name()),
-                   .mapped_diffid = std::string(l_instruction->name()),
-                   .mapped_instruction = l_instruction};
+    span_attributes[l_instruction] = Attributes{
+        .highlight = "yellow-highlight",
+        .diffid = absl::StrCat("left:", l_instruction->name()),
+        .mapped_diffid = absl::StrCat("right:", r_instruction->name()),
+        .mapped_instruction = r_instruction};
+    span_attributes[r_instruction] = Attributes{
+        .highlight = "yellow-highlight",
+        .diffid = absl::StrCat("right:", r_instruction->name()),
+        .mapped_diffid = absl::StrCat("left:", l_instruction->name()),
+        .mapped_instruction = l_instruction};
   }
   for (const auto& [l_instruction, r_instruction] :
        diff_result.unchanged_instructions) {
-    span_attributes[l_instruction] =
-        Attributes{.highlight = "",
-                   .diffid = std::string(l_instruction->name()),
-                   .mapped_diffid = std::string(r_instruction->name()),
-                   .mapped_instruction = r_instruction};
-    span_attributes[r_instruction] =
-        Attributes{.highlight = "",
-                   .diffid = std::string(r_instruction->name()),
-                   .mapped_diffid = std::string(l_instruction->name()),
-                   .mapped_instruction = l_instruction};
+    span_attributes[l_instruction] = Attributes{
+        .highlight = "",
+        .diffid = absl::StrCat("left:", l_instruction->name()),
+        .mapped_diffid = absl::StrCat("right:", r_instruction->name()),
+        .mapped_instruction = r_instruction};
+    span_attributes[r_instruction] = Attributes{
+        .highlight = "",
+        .diffid = absl::StrCat("right:", r_instruction->name()),
+        .mapped_diffid = absl::StrCat("left:", l_instruction->name()),
+        .mapped_instruction = l_instruction};
   }
   return span_attributes;
 };
@@ -829,8 +874,12 @@ std::string PrintHloComputationToHtml(
   printer.Append("<b>%");
   printer.Append(comp->name());
   printer.Append(" ");
+  printer.Append(
+      "<button class='hlo-program-shape-btn'>show program shape</button>");
+  printer.Append("<span class='hlo-program-shape' style='display: none;'>");
   ShapeUtil::PrintHumanString(&printer,
                               comp->ComputeProgramShape(/*include_ids=*/true));
+  printer.Append("</span>");
   printer.Append(" ");
   printer.Append("{</b>\n");
 
@@ -893,33 +942,38 @@ std::string PrintHloComputationToHtml(
         std::string current_str = std::move(current_printer).ToString();
         std::string mapped_str = std::move(mapped_printer).ToString();
 
-        std::vector<TextDiffChunk> diff_chunks;
-        if (is_left_node) {
-          // Left side: diff current (left) vs mapped (right).
-          diff_chunks = ComputeTextDiff(current_str, mapped_str);
+        // Skip text diff if the two strings are longer than 10000 characters.
+        if (current_str.size() > 10000 || mapped_str.size() > 10000) {
+          printer.Append(current_str);
         } else {
-          // Right side: diff mapped (left) vs current (right).
-          diff_chunks = ComputeTextDiff(mapped_str, current_str);
-        }
-
-        for (const auto& chunk : diff_chunks) {
-          if (chunk.type == TextDiffType::kUnchanged) {
-            printer.Append(EscapeStringForHtmlAttribute(chunk.text));
-          } else if (is_left_node && chunk.type == TextDiffType::kRemoved) {
-            // On the left side, highlight text REMOVED from left compared to
-            // right.
-            printer.Append("<span class=\"darker-yellow-highlight\">");
-            printer.Append(EscapeStringForHtmlAttribute(chunk.text));
-            printer.Append("</span>");
-          } else if (!is_left_node && chunk.type == TextDiffType::kAdded) {
-            // On the right side, highlight text ADDED to right compared to
-            // left.
-            printer.Append("<span class=\"darker-yellow-highlight\">");
-            printer.Append(EscapeStringForHtmlAttribute(chunk.text));
-            printer.Append("</span>");
+          std::vector<TextDiffChunk> diff_chunks;
+          if (is_left_node) {
+            // Left side: diff current (left) vs mapped (right).
+            diff_chunks = ComputeTextDiff(current_str, mapped_str);
           } else {
-            printer.Append("<span class=\"darker-yellow-highlight\">");
-            printer.Append("</span>");
+            // Right side: diff mapped (left) vs current (right).
+            diff_chunks = ComputeTextDiff(mapped_str, current_str);
+          }
+
+          for (const auto& chunk : diff_chunks) {
+            if (chunk.type == TextDiffType::kUnchanged) {
+              printer.Append(EscapeStringForHtmlAttribute(chunk.text));
+            } else if (is_left_node && chunk.type == TextDiffType::kRemoved) {
+              // On the left side, highlight text REMOVED from left compared to
+              // right.
+              printer.Append("<span class=\"darker-yellow-highlight\">");
+              printer.Append(EscapeStringForHtmlAttribute(chunk.text));
+              printer.Append("</span>");
+            } else if (!is_left_node && chunk.type == TextDiffType::kAdded) {
+              // On the right side, highlight text ADDED to right compared to
+              // left.
+              printer.Append("<span class=\"darker-yellow-highlight\">");
+              printer.Append(EscapeStringForHtmlAttribute(chunk.text));
+              printer.Append("</span>");
+            } else {
+              printer.Append("<span class=\"darker-yellow-highlight\">");
+              printer.Append("</span>");
+            }
           }
         }
       }
@@ -942,13 +996,14 @@ std::string PrintHloComputationToHtml(
 // Prints a single HLO instruction in a text box.
 template <typename T>
 std::string PrintHloTextbox(
-    const T* node, const absl::flat_hash_map<const HloInstruction*, Attributes>&
-                       span_attributes) {
+    const T* node, DiffSide side,
+    const absl::flat_hash_map<const HloInstruction*, Attributes>&
+        span_attributes) {
   std::string title = "None", text;
   if (node != nullptr) {
     title = node->name();
     if constexpr (std::is_same_v<T, HloComputation>) {
-      text = PrintHloComputationToHtml(node, DiffSide::kLeft, span_attributes);
+      text = PrintHloComputationToHtml(node, side, span_attributes);
     } else {
       text = node->ToString();
     }
@@ -968,10 +1023,12 @@ std::string PrintHloTextboxPair(
         span_attributes) {
   std::string left_textbox, right_textbox;
   for (const T* node : left_nodes) {
-    absl::StrAppend(&left_textbox, PrintHloTextbox(node, span_attributes));
+    absl::StrAppend(&left_textbox,
+                    PrintHloTextbox(node, DiffSide::kLeft, span_attributes));
   }
   for (const T* node : right_nodes) {
-    absl::StrAppend(&right_textbox, PrintHloTextbox(node, span_attributes));
+    absl::StrAppend(&right_textbox,
+                    PrintHloTextbox(node, DiffSide::kRight, span_attributes));
   }
   return PrintDiv(absl::StrCat(PrintDiv(left_textbox, {"hlo-textboxes"}),
                                PrintDiv(right_textbox, {"hlo-textboxes"})),
