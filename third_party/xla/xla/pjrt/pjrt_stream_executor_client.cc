@@ -150,6 +150,7 @@ limitations under the License.
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/stream.h"
+#include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/framework/allocator.h"
 #include "xla/tsl/platform/env.h"
@@ -532,6 +533,46 @@ PjRtStreamExecutorClient::DefineBuffer(
   auto py_buffer = std::make_unique<CommonPjRtBufferImpl>(
       on_device_shape, std::move(dst_device_buffer), memory_space);
   return py_buffer;
+}
+
+absl::StatusOr<std::pair<tsl::RCReference<CommonPjRtRawBuffer>,
+                         CommonPjRtClient::PjRtFulfillAliasRawBufferCallback>>
+PjRtStreamExecutorClient::CreateRawBufferChannel(
+    PjRtMemorySpace* memory_space) {
+  auto buffer_promise = tsl::MakeIndirectAsyncValue();
+  auto* device = tensorflow::down_cast<PjRtStreamExecutorDevice*>(
+      memory_space->devices()[0]);
+  TF_ASSIGN_OR_RETURN(LocalDeviceState * local_device,
+                      device->GetLocalDeviceState());
+  auto raw_buffer = tsl::MakeRef<PjRtStreamExecutorRawBuffer>(
+      this, memory_space, local_device,
+      tsl::AsyncValueRef<RawSEDeviceMemory>(buffer_promise));
+
+  auto buffer_promise_cb =
+      [buffer_promise = std::move(buffer_promise), memory_space](
+          absl::StatusOr<tsl::RCReference<CommonPjRtRawBuffer>> raw_buffer)
+      -> absl::Status {
+    if (!raw_buffer.ok()) {
+      buffer_promise->SetError(raw_buffer.status());
+      return raw_buffer.status();
+    }
+    if (memory_space != (*raw_buffer)->memory_space()) {
+      auto status = absl::InvalidArgumentError(absl::StrFormat(
+          "Memory space mismatch when forarding raw buffers: %s vs %s",
+          memory_space->DebugString(),
+          (*raw_buffer)->memory_space()->DebugString()));
+      buffer_promise->SetError(status);
+      return status;
+    }
+    buffer_promise->ForwardTo(
+        tensorflow::down_cast<xla::PjRtStreamExecutorRawBuffer*>(
+            raw_buffer->get())
+            ->device_buffer()
+            .CopyRCRef());
+    return absl::OkStatus();
+  };
+
+  return std::make_pair(std::move(raw_buffer), std::move(buffer_promise_cb));
 }
 
 void PjRtStreamExecutorClient::WaitForAllocation(
@@ -1329,7 +1370,7 @@ PjRtStreamExecutorLoadedExecutable::MakeExecutionInputsAndWaitForEvents(
   // Lift tuple_write_event outside the conditional so that the event it
   // returns is not destroyed until after the loop below that waits on events.
   BufferSequencingEventRef tuple_write_event;
-  if (parameter_is_tupled_arguments_ && !options.arguments_are_tupled) {
+  if (parameter_is_tupled_arguments_) {
     TF_ASSIGN_OR_RETURN(
         auto tuple_handle,
         MakeTupleHelper(client_, device_state, options.strict_shape_checking,
@@ -1741,20 +1782,6 @@ PjRtStreamExecutorLoadedExecutable::EnqueueExecution(
 
     GetDeviceBufferEvents(*device_buffer, /*get_usage_events=*/must_donate,
                           &events);
-  }
-
-  if (options.arguments_are_tupled) {
-    if (!parameter_is_tupled_arguments_) {
-      return InvalidArgument(
-          "Arguments may only be supplied as a tuple when the executable was "
-          "compiled with a single tupled parameter");
-    }
-    if (argument_handles.size() != 1) {
-      return InvalidArgument(
-          "Option arguments_are_tupled was true but %d buffers were passed to "
-          "execution",
-          argument_handles.size());
-    }
   }
 
   TF_ASSIGN_OR_RETURN(
